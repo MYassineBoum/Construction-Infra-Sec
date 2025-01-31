@@ -1,0 +1,87 @@
+- name: Deploy Dockerized application to EKS
+  hosts: localhost
+  tasks:
+    - name: Create namespace for juice-shop
+      kubernetes.core.k8s:
+        kubeconfig: ~/.kube/config
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: juice-shop-namespace
+
+    - name: Create Kubernetes deployment
+      kubernetes.core.k8s:
+        kubeconfig: ~/.kube/config
+        state: present
+        namespace: juice-shop-namespace
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: juice-shop
+            labels:
+              app: juice-shop
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: juice-shop
+            template:
+              metadata:
+                labels:
+                  app: juice-shop
+              spec:
+                containers:
+                  - name: juice-shop-container
+                    image: bkimminich/juice-shop
+                    ports:
+                      - containerPort: 3000
+
+    - name: Expose deployment as a service
+      kubernetes.core.k8s:
+        kubeconfig: ~/.kube/config
+        state: present
+        namespace: juice-shop-namespace
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: juice-shop-service
+            namespace: juice-shop-namespace
+          spec:
+            selector:
+              app: juice-shop
+            ports:
+            - port: 3000
+              targetPort: 3000
+            type: ClusterIP
+
+    - name: Create ALB Ingress
+      kubernetes.core.k8s:
+        kubeconfig: ~/.kube/config
+        state: present
+        namespace: juice-shop-namespace
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: juice-shop-ingress
+            annotations:
+              kubernetes.io/ingress.class: alb
+              alb.ingress.kubernetes.io/scheme: internet-facing
+              alb.ingress.kubernetes.io/target-type: ip
+              alb.ingress.kubernetes.io/certificate-arn: "{{ cert_arn }}"
+              alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+          spec:
+            rules:
+            - http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: juice-shop-service
+                      port:
+                        number: 3000

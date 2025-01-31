@@ -1,0 +1,6 @@
+ansible
+ansible-core
+awscli
+boto3
+botocore
+kubernetes

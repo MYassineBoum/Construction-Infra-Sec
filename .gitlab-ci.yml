@@ -1,0 +1,83 @@
+stages:
+  - provision
+  - deploy
+  - secure
+
+terraform:
+ stage: provision
+ image: 
+   name: hashicorp/terraform:light
+   entrypoint: [""]
+ script:
+   - cd provisioning-terraform
+   - terraform init
+   - terraform apply -auto-approve -var "aws_access_key=$AWS_ACCESS_KEY_ID" -var "aws_secret_key=$AWS_SECRET_ACCESS_KEY" -var "aws_session_token=$AWS_SESSION_TOKEN"
+
+ansible:
+  stage: deploy
+  image: python:3.12-alpine
+  before_script:
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN
+    - apk add --no-cache curl bash openssl
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+    - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    - python3 -m venv myenv
+    - source myenv/bin/activate
+    - pip install -r requirements.txt
+    - aws eks update-kubeconfig --name eks-cluster-cis --region us-east-1
+    - helm repo add eks https://aws.github.io/eks-charts
+    - helm repo update
+    - export CERT_ARN=$(aws acm list-certificates --region us-east-1 --query "CertificateSummaryList[?contains(DomainName, 'owasp-juice-shop.me')].CertificateArn" --output text)
+    - export VPC_ID=$(aws eks describe-cluster --name eks-cluster-cis --region us-east-1 --query "cluster.resourcesVpcConfig.vpcId" --output text)
+    - helm install aws-load-balancer-controller eks/aws-load-balancer-controller --set clusterName=eks-cluster-cis --set region=us-east-1 --set vpcId=$VPC_ID --set serviceAccount.create=false -n kube-system
+    - export AWS_DEFAULT_REGION=us-east-1
+  script:
+    - kubectl wait --namespace kube-system --for=condition=Ready pod -l app.kubernetes.io/name=aws-load-balancer-controller --timeout=300s
+    - cd deploying-ansible
+    - ansible-playbook deploy.yml -e "cert_arn=$CERT_ARN"
+    - echo "Waiting for ALB to be created..."
+    - |
+      timeout=300  # Timeout after 300 seconds
+      interval=10  # Check every 10 seconds
+      elapsed=0
+      while true; do
+        ALB_ARN=$(aws elbv2 describe-load-balancers --region us-east-1 --query "LoadBalancers[0].LoadBalancerArn" --output text)
+        if [[ $ALB_ARN != "None" && $ALB_ARN != "" ]]; then
+          echo "ALB is ready: $ALB_ARN"
+          echo $ALB_ARN > alb_arn.txt
+          break
+        fi
+        elapsed=$((elapsed + interval))
+        if [[ $elapsed -ge $timeout ]]; then
+          echo "Timeout waiting for ALB to be ready"
+          exit 1
+        fi
+        echo "Waiting for ALB... Elapsed: $elapsed seconds"
+        sleep $interval
+      done
+    - cd ..
+    - echo $ALB_ARN > alb_arn.txt
+  artifacts:
+    paths:
+      - alb_arn.txt
+  dependencies:
+    - terraform
+
+waf:
+  stage: secure
+  image: 
+    name: hashicorp/terraform:light
+    entrypoint: [""]
+  script:
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN
+    - export ALB_ARN=$(cat alb_arn.txt)
+    - cd security-terraform
+    - terraform init
+    - terraform apply -auto-approve -var "aws_access_key=$AWS_ACCESS_KEY_ID" -var "aws_secret_key=$AWS_SECRET_ACCESS_KEY" -var "aws_session_token=$AWS_SESSION_TOKEN" -var "alb_arn=$ALB_ARN"
+  dependencies:
+    - ansible

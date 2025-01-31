@@ -1,0 +1,6 @@
+provisioning-terraform/.terraform
+provisioning-terraform/.terraform.lock.hcl
+provisioning-terraform/.terraform.tfstate.lock.info
+provisioning-terraform/terraform.tfstate
+provisioning-terraform/terraform.tfstate.backup
+ansible-env
